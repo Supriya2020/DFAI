@@ -767,3 +767,165 @@ elif step == steps[5]:
             file_name="fl_comparison_results.csv",
             mime="text/csv",
         )
+elif step == steps[6]:
+    MODEL_OPTIONS = [
+    "Random Forest", "Logistic Regression", "SVM", "Naive Bayes",
+    "Decision Tree", "KNN", "Gradient Boosting", "AdaBoost"
+]
+
+    AVERAGING_POLICIES = [
+        "Simple Average",
+        "Weighted Average (by data size)",
+        "Dynamic Averaging (mean Q-value based)",
+        "Dynamic Averaging (variance-based)",
+        "Hybrid Averaging (mean * inverse variance)",
+        "Confidence-Weighted Adaptive Averaging (CWAA)",
+        "Dynamic Federated Averaging with Intelligence (DFAI)"
+    ]
+
+    # Sidebar selections
+    st.sidebar.header("🧠 Federated Learning Simulation")
+    selected_models = st.sidebar.multiselect("Select Models", MODEL_OPTIONS, default=["Random Forest"])
+    selected_averagings = st.sidebar.multiselect("Select Averaging Methods", AVERAGING_POLICIES, default=["Simple Average"])
+    clients = st.sidebar.slider("Number of Clients", 2, 10, 5)
+    rounds = st.sidebar.slider("Federated Rounds", 1, 20, 5)
+    epochs = st.sidebar.slider("Local Epochs", 1, 10, 3)
+    learning_rate = st.sidebar.number_input("Learning Rate (for DNN, optional)", min_value=0.0001, max_value=1.0, value=0.01, step=0.01, format="%f")
+
+    st.header("🚀 Federated Learning Run with Multiple Models and Averaging")
+
+    # Get processed data
+    X = st.session_state.processed_X
+    y = st.session_state.processed_y
+
+    # Split global data
+    X_train_global, X_test_global, y_train_global, y_test_global = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+    scaler = StandardScaler()
+    X_train_global_scaled = scaler.fit_transform(X_train_global)
+    X_test_global_scaled = scaler.transform(X_test_global)
+
+    # Split data among clients
+    X_parts = np.array_split(X_train_global_scaled, clients)
+    y_parts = np.array_split(y_train_global, clients)
+
+    # Container for results
+    final_results = []
+
+    # Helper: Train model and return predictions + proba
+    def train_and_predict(model, X_tr, y_tr, X_te):
+        model.fit(X_tr, y_tr)
+        preds = model.predict(X_te)
+        probas = model.predict_proba(X_te) if hasattr(model, "predict_proba") else None
+        return preds, probas
+
+    # Helper: Create model instance
+    def get_model_instance(name, round_seed):
+        if name == "Random Forest": return RandomForestClassifier(random_state=round_seed)
+        elif name == "Logistic Regression": return LogisticRegression(solver='liblinear', max_iter=1000)
+        elif name == "SVM": return SVC(probability=True)
+        elif name == "Naive Bayes": return GaussianNB()
+        elif name == "Decision Tree": return DecisionTreeClassifier(random_state=round_seed)
+        elif name == "KNN": return KNeighborsClassifier()
+        elif name == "Gradient Boosting": return GradientBoostingClassifier(random_state=round_seed)
+        elif name == "AdaBoost": return AdaBoostClassifier(random_state=round_seed)
+
+    # Main FL loop for each model
+    for model_name in selected_models:
+        for averaging in selected_averagings:
+            global_predictions = None
+
+            for r in range(rounds):
+                client_models = []
+                client_data_sizes = []
+                client_probs = []
+                for i in range(clients):
+                    model = get_model_instance(model_name, r+i)
+                    X_c, y_c = X_parts[i], y_parts[i]
+                    if len(np.unique(y_c)) < 2: continue
+                    model.fit(X_c, y_c)
+                    client_models.append(model)
+                    client_data_sizes.append(len(X_c))
+                    if hasattr(model, 'predict_proba'):
+                        client_probs.append(model.predict_proba(X_test_global_scaled))
+
+                # Averaging logic
+                if averaging == "Simple Average" and client_probs:
+                    global_probs = np.mean(client_probs, axis=0)
+                    global_predictions = np.argmax(global_probs, axis=1)
+
+                elif averaging == "Weighted Average (by data size)" and client_probs:
+                    total = sum(client_data_sizes)
+                    weights = [s / total for s in client_data_sizes]
+                    weighted_probs = sum(w * p for w, p in zip(weights, client_probs))
+                    global_predictions = np.argmax(weighted_probs, axis=1)
+
+                elif averaging == "Dynamic Averaging (mean Q-value based)" and client_probs:
+                    confidences = [np.mean(np.max(p, axis=1)) for p in client_probs]
+                    total_conf = sum(confidences)
+                    weights = [c / total_conf for c in confidences]
+                    global_probs = sum(w * p for w, p in zip(weights, client_probs))
+                    global_predictions = np.argmax(global_probs, axis=1)
+
+                elif averaging == "Dynamic Averaging (variance-based)" and client_probs:
+                    variances = [np.mean(np.var(p, axis=1)) for p in client_probs]
+                    inv_vars = [1 / (v + 1e-6) for v in variances]
+                    total_inv = sum(inv_vars)
+                    weights = [v / total_inv for v in inv_vars]
+                    global_probs = sum(w * p for w, p in zip(weights, client_probs))
+                    global_predictions = np.argmax(global_probs, axis=1)
+
+                elif averaging == "Hybrid Averaging (mean * inverse variance)" and client_probs:
+                    hybrid_scores = [np.mean(np.max(p, axis=1)) / (np.mean(np.var(p, axis=1)) + 1e-6) for p in client_probs]
+                    total_hybrid = sum(hybrid_scores)
+                    weights = [h / total_hybrid for h in hybrid_scores]
+                    global_probs = sum(w * p for w, p in zip(weights, client_probs))
+                    global_predictions = np.argmax(global_probs, axis=1)
+
+                elif averaging == "Confidence-Weighted Adaptive Averaging (CWAA)" and client_probs:
+                    scores = [np.mean(np.max(p, axis=1)) * acc for p, acc in zip(client_probs, [m.score(X_test_global_scaled, y_test_global) for m in client_models])]
+                    total_score = sum(scores)
+                    weights = [s / total_score for s in scores]
+                    global_probs = sum(w * p for w, p in zip(weights, client_probs))
+                    global_predictions = np.argmax(global_probs, axis=1)
+
+                elif averaging == "Dynamic Federated Averaging with Intelligence (DFAI)" and client_probs:
+                    trust_scores = [
+                        (np.mean(np.max(p, axis=1)) * m.score(X_test_global_scaled, y_test_global)) /
+                        (np.mean(np.var(p, axis=1)) + 1e-6) for p, m in zip(client_probs, client_models)
+                    ]
+                    total_trust = sum(trust_scores)
+                    weights = [t / total_trust for t in trust_scores]
+                    global_probs = sum(w * p for w, p in zip(weights, client_probs))
+                    global_predictions = np.argmax(global_probs, axis=1)
+
+            # Evaluate final result
+            if global_predictions is not None:
+                acc = accuracy_score(y_test_global, global_predictions)
+                prec = precision_score(y_test_global, global_predictions, average='weighted', zero_division=0)
+                rec = recall_score(y_test_global, global_predictions, average='weighted', zero_division=0)
+                f1 = f1_score(y_test_global, global_predictions, average='weighted', zero_division=0)
+                final_results.append({
+                    "Model": model_name,
+                    "Averaging": averaging,
+                    "Accuracy": acc,
+                    "Precision": prec,
+                    "Recall": rec,
+                    "F1 Score": f1
+                })
+
+    # Display results
+    st.subheader("📈 Final Results Summary")
+    results_df = pd.DataFrame(final_results)
+    st.dataframe(results_df.style.format("{:.4f}"))
+
+    # Plotting
+    fig = px.bar(
+        results_df,
+        x="Model",
+        y=["Accuracy", "Precision", "Recall", "F1 Score"],
+        color="Averaging",
+        barmode="group",
+        title="Model Performance Comparison across Averaging Strategies"
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
