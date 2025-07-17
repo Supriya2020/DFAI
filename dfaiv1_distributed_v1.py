@@ -36,6 +36,28 @@ import plotly.express as px
 import plotly.graph_objects as go
 st.set_page_config(layout="wide")
 
+def display_wrapped_table(df):
+    styled_html = f"""
+    <style>
+    .wrapped-table {{
+        font-size: 12px;
+        border-collapse: collapse;
+        width: 100%;
+        table-layout: fixed;
+        word-wrap: break-word;
+        overflow-wrap: break-word;
+    }}
+    .wrapped-table th, .wrapped-table td {{
+        border: 1px solid #ccc;
+        padding: 4px;
+        text-align: left;
+        white-space: normal;
+        vertical-align: top;
+    }}
+    </style>
+    {df.to_html(classes='wrapped-table', index=False)}
+    """
+    st.markdown(styled_html, unsafe_allow_html=True)
 # Attempt to import TensorFlow and set availability flag
 try:
     from tensorflow.keras.models import Sequential
@@ -104,7 +126,7 @@ if step == steps[0]:
             df = pd.read_csv(file)
             st.session_state.data = df
             st.write("Preview of your data (first 5 rows):")
-            st.dataframe(df.head())
+            display_wrapped_table(df.head())
             st.success("Data uploaded successfully! Proceed to '2. Select Variables'.")
             # Clear dependent states if new data is uploaded
             for key_to_clear in ["categorical", "continuous", "target", "exclude",
@@ -212,7 +234,7 @@ elif step == steps[2]:
             "Kurtosis": kurtosis(X[col])
         }
 
-    st.dataframe(stats_table.T.style.format("{:.4f}"))
+    display_wrapped_table(stats_table.T.style.format("{:.4f}"))
 
     # Step 5: Correlation heatmap
     st.subheader("🔗 Correlation Heatmap")
@@ -342,7 +364,7 @@ elif step == steps[3]:
 
     # 3.3 सारांश टेबल
     st.markdown("#### 📋 Continuous Features Summary")
-    st.dataframe(pd.DataFrame(stats_summary).set_index("Feature").style.format("{:.4f}"))
+    display_wrapped_table(pd.DataFrame(stats_summary).set_index("Feature").style.format("{:.4f}"))
 
     # 3.4 Correlation Heatmap
     st.markdown("#### 🔗 Correlation Heatmap")
@@ -514,7 +536,13 @@ elif step == steps[4]:
                             auc_val = roc_auc_score(y_bin, probs, multi_class='ovr')
                         loss_val = log_loss(y_test_labels, probs)
                         total_comm += probs.nbytes
-
+                        acc = accuracy_score(y_test_labels, preds)
+                        prec = precision_score(y_test_labels, preds, average='weighted', zero_division=0)
+                        rec = recall_score(y_test_labels, preds, average='weighted', zero_division=0)
+                        f1 = f1_score(y_test_labels, preds, average='weighted', zero_division=0)
+                        fairness = np.std([acc, prec, rec, f1])
+                        disagreement = np.mean(preds != y_test_labels)
+                        robustness = 1 - disagreement
                         client_metrics.append({
                             "Client": f"Client {i+1}",
                             "Model": model_type,
@@ -522,6 +550,9 @@ elif step == steps[4]:
                             "Precision": precision_score(y_test_labels, preds, average='weighted', zero_division=0),
                             "Recall": recall_score(y_test_labels, preds, average='weighted', zero_division=0),
                             "F1 Score": f1_score(y_test_labels, preds, average='weighted', zero_division=0),
+                            "Fairness": fairness,
+                            "Disagreement":disagreement,
+                            "Robustness": robustness,
                             "AUC": auc_val,
                             "Loss": loss_val,
                             "Train T(s)": elapsed,
@@ -603,7 +634,7 @@ elif step == steps[4]:
                         st.write("🔍 Averaging Weights:", {f"Client {i+1}": round(w, 4) for i, w in enumerate(weights)})
                         df_client = pd.DataFrame(client_metrics)
                         float_cols = df_client.select_dtypes(include='float').columns
-                        st.dataframe(df_client.style.format({col: "{:.4f}" for col in float_cols}))
+                        display_wrapped_table(df_client.style.format({col: "{:.4f}" for col in float_cols}))
 
                         fpr = {}
                         tpr = {}
@@ -626,12 +657,30 @@ elif step == steps[4]:
                 df_summary["AUC"] = round_wise_aucs
                 df_summary["Disagreement"] = round_wise_disagreements
                 df_summary["Com.Overhead"] = communication_overhead
-                st.dataframe(df_summary.style.format("{:.4f}"))
+                display_wrapped_table(df_summary.style.format("{:.4f}"))
 
-                fig = px.line(df_summary, x="Round", y=["Accuracy",	"Precision","Recall",	"F1 Score",	"Fairness",	"Noise Robustness",	"Loss",	"AUC",	"Disagreement",	"Com.Overhead"],
-                            markers=True, title="Federated Metrics Over Rounds")
+                # fig = px.line(df_summary, x="Round", y=["Accuracy",	"Precision","Recall",	"F1 Score",	"Fairness",	"Noise Robustness",	"Loss",	"AUC",	"Disagreement",	"Com.Overhead"],
+                #             markers=True, title="Federated Metrics Over Rounds")
+                # st.plotly_chart(fig, use_container_width=True)
+                fig = px.line(df_summary, x="Round",
+                            y=["Accuracy", "Precision", "Recall", "F1 Score", "Loss", "AUC", "Fairness", "Noise Robustness"],
+                            markers=True,
+                            title="Federated Metrics Over Rounds")
+
+                fig.add_scatter(x=df_summary["Round"], y=df_summary["Com.Overhead"],
+                                mode='lines+markers',
+                                name='Com. Overhead',
+                                yaxis='y2')
+
+                fig.update_layout(
+                    yaxis=dict(title='Main Metrics'),
+                    yaxis2=dict(title='Communication Overhead', overlaying='y', side='right', showgrid=False),
+                    legend=dict(x=1.05, y=1),
+                    width=1000,
+                    height=500
+                )
+
                 st.plotly_chart(fig, use_container_width=True)
-
                 st.subheader("📈 ROC Curve (Last Round)")
                 last_round, fpr_dict, tpr_dict = roc_data_per_round[-1]
                 fig_roc = go.Figure()
@@ -665,7 +714,7 @@ elif step == steps[5]:
     avg_df = st.session_state.average_results_df
 
     st.subheader("📌 Accuracy, Precision, Recall, F1 per Round")
-    st.dataframe(final_df)
+    display_wrapped_table(final_df)
 
     # Plot: Accuracy per Round per Averaging Policy
     fig = px.line(
@@ -731,7 +780,7 @@ elif step == steps[5]:
     # Aggregated Accuracy Comparison
     st.subheader("📊 Average Metrics by Model & Averaging")
     numeric_cols = avg_df.select_dtypes(include=[np.number]).columns
-    st.dataframe(avg_df.style.format({col: "{:.4f}" for col in numeric_cols}))
+    display_wrapped_table(avg_df.style.format({col: "{:.4f}" for col in numeric_cols}))
 
     fig_avg = px.bar(
         avg_df,
